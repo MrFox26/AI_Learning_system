@@ -1,0 +1,5 @@
+streamlit
+chromadb
+openai
+requests
+beautifulsoup4
