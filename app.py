@@ -1,151 +1,123 @@
+# app.py
 import streamlit as st
-import os
-import chromadb
+from langchain_community.document_loaders import WikipediaLoader, ArxivLoader, YoutubeLoader
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain.embeddings import HuggingFaceEmbeddings
+from langchain_chroma import Chroma
+from langchain.prompts import PromptTemplate
+from langchain.chat_models import init_chat_model
 import requests
-from bs4 import BeautifulSoup
-import urllib.parse
-import random
-import time
+import os
 
-st.set_page_config(page_title="Personalized Learning Assistant", layout="wide")
+# Load environment variables
+from dotenv import load_dotenv
+load_dotenv()
 
-# Query generation
-def generate_query(topic, objective):
-    return f"How to learn {topic} to achieve {objective}"
+# --- UI: Collect user preferences ---
+st.title("🧠 AI-Powered Learning Assistant")
 
-# Simulated Bing search results
-def bing_results(query):
-    return [f"https://example.com/search_result_{i}?q={urllib.parse.quote(query)}" for i in range(1, 6)]
+with st.form("preferences_form"):
+    topic = st.text_input("What topic do you want to learn about?")
+    objective = st.text_input("What is your learning goal?")
+    knowledge = st.selectbox("Your current knowledge level", ["Beginner", "Intermediate", "Advanced"])
+    preferred_format = st.multiselect("Preferred format", ["Text", "Videos", "Diagrams", "Examples", "All"], default=["All"])
+    submitted = st.form_submit_button("Generate Learning Report")
 
-# Wikipedia summary fetching
-def wikipedia_summary(query):
-    search_url = f"https://en.wikipedia.org/w/index.php?search={urllib.parse.quote(query)}"
-    try:
-        response = requests.get(search_url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=10)
-        response.raise_for_status()
-        soup = BeautifulSoup(response.text, 'html.parser')
-        content = soup.find('div', class_='mw-parser-output')
-        if content:
-            for para in content.find_all('p'):
-                if para.text.strip():
-                    return para.text.strip()
-        return "No Wikipedia summary found."
-    except requests.RequestException as e:
-        return f"Error fetching Wikipedia summary: {str(e)}"
+if submitted and topic:
+    with st.spinner("Gathering information..."):
 
-def arxiv_papers(query):
-    return [(f"Simulated Paper Title {i}", f"Simulated abstract for {query}", f"https://arxiv.org/abs/1234.{random.randint(1000,9999)}") for i in range(1, 4)]
+        # --- Convert preferences to query ---
+        query = f"I'm a {knowledge.lower()} learner interested in '{topic}'. " \
+                f"My goal is to learn about {objective}, and I prefer learning through {', '.join(preferred_format).lower()}."
 
-def semantic_scholar_papers(query):
-    return [(f"Simulated Research Title {i}", f"Simulated research abstract on {query}", f"https://semanticscholar.org/paper/{random.randint(100000,999999)}") for i in range(1, 4)]
+        # --- Load content sources ---
+        text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
 
-def youtube_transcript(query):
-    return " ".join([
-        f"In this video, we discuss {query} in depth.",
-        f"The basics of {query} are explained thoroughly.",
-        f"We move into advanced techniques.",
-        f"Finally, we wrap up the session with key takeaways."
-    ])
+        data1_split, data2_split, data4_split = [], [], []
 
-# Fetch info from simulated sources
-def fetch_information_simulated(query):
-    with st.spinner("Fetching resources..."):
-        info = {
-            'Bing_Web_Results': bing_results(query),
-            'Wikipedia_Summary': wikipedia_summary(query),
-            'Arxiv_Papers': arxiv_papers(query),
-            'Semantic_Scholar_Papers': semantic_scholar_papers(query),
-            'YouTube_Transcript': youtube_transcript(query)
-        }
-        time.sleep(1)
-        return info
+        if "Text" in preferred_format or "All" in preferred_format:
+            try:
+                wiki_loader = WikipediaLoader(query=topic, load_max_docs=5)
+                wiki_data = wiki_loader.load()
+                data1_split = text_splitter.split_documents(wiki_data)
+            except:
+                st.warning("Wikipedia loading failed.")
 
-# Store in ChromaDB
-def store_to_chroma(info_dict, query, collection_name="learning_resources"):
-    client = chromadb.PersistentClient(path="./chroma_db")
-    collection = client.get_or_create_collection(collection_name)
+            try:
+                arxiv_loader = ArxivLoader(query=topic, load_max_docs=5)
+                arxiv_data = arxiv_loader.load()
+                data2_split = text_splitter.split_documents(arxiv_data)
+            except:
+                st.warning("ArXiv loading failed.")
 
-    documents, metadatas, ids = [], [], []
-    counter = 0
-    for source, content in info_dict.items():
-        if isinstance(content, list):
-            for item in content:
-                text = " ".join(item) if isinstance(item, tuple) else str(item)
-                documents.append(text)
-                metadatas.append({"query": query, "source": source})
-                ids.append(f"{source}_{counter}")
-                counter += 1
-        else:
-            documents.append(str(content))
-            metadatas.append({"query": query, "source": source})
-            ids.append(f"{source}_{counter}")
-            counter += 1
+        if "Videos" in preferred_format or "All" in preferred_format:
+            YT_API_KEY = os.getenv("YOUTUBE_API_KEY")
+            if not YT_API_KEY:
+                st.error("Missing YouTube API Key. Set YOUTUBE_API_KEY in .env")
+            else:
+                yt_url = f"https://www.googleapis.com/youtube/v3/search?part=snippet&type=video&q={topic}&maxResults=5&key={YT_API_KEY}"
+                response = requests.get(yt_url)
+                yt_links = [
+                    f"https://www.youtube.com/watch?v={item['id']['videoId']}"
+                    for item in response.json().get("items", [])
+                ]
 
-    collection.add(documents=documents, metadatas=metadatas, ids=ids)
+                for link in yt_links:
+                    try:
+                        yt_loader = YoutubeLoader.from_youtube_url(link, add_video_info=False)
+                        yt_data = yt_loader.load()
+                        data4_split.extend(text_splitter.split_documents(yt_data))
+                    except Exception as e:
+                        st.warning(f"Skipping video due to error: {e}")
 
-# Generate structured report using Groq API
-def generate_structured_report(query, collection_name="learning_resources", model="llama3-8b-8192"):
-    groq_api_key = os.getenv("GROQ_API_KEY")
-    if not groq_api_key:
-        st.error("Missing GROQ_API_KEY in environment variables.")
-        return "API key error."
+        # --- Create vector store and retrieve ---
+        all_docs = data1_split + data2_split + data4_split
+        if not all_docs:
+            st.error("No content could be loaded.")
+            st.stop()
 
-    groq_api_url = "https://api.groq.com/openai/v1/chat/completions"
+        embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-mpnet-base-v2")
+        vector_store = Chroma(
+            collection_name="learning_assistant",
+            embedding_function=embeddings,
+            persist_directory="./chroma_langchain_db"
+        )
+        vector_store.add_documents(all_docs)
+        retriever = vector_store.as_retriever(search_type="similarity", search_kwargs={"k": 30})
+        retrieved_docs = retriever.invoke(query)
+        context = "\n\n".join([doc.page_content for doc in retrieved_docs])
 
-    client = chromadb.PersistentClient(path="./chroma_db")
-    collection = client.get_or_create_collection(name=collection_name)
-    results = collection.query(query_texts=[query], n_results=10)
-    relevant_docs = results.get('documents', [[]])[0]
-    combined_context = "\n\n".join(relevant_docs) if relevant_docs else "No relevant documents found."
+        # --- Prompt & LLM ---
+        template = """
+        You are an AI educational assistant. Based on the provided context and query, generate a detailed, well-structured educational report in **markdown** format with the following **exact** sections:
 
-    prompt = f"""
-You are a learning assistant. Based on the following educational content, generate a detailed, structured report. Include:
+        1. Title  
+        2. Introduction  
+        3. Learning Objectives  
+        4. Concept Breakdown  
+        5. Visual Aids Description  
+        6. Examples and Use Cases  
+        7. Citations & References  
+        8. Recommended Additional Resources  
+        9. Conclusion and Next Steps
 
-1. Introduction
-2. Learning Objectives
-3. Core Concepts
-4. Visual Aids (Mermaid syntax)
-5. Citations
-6. Next Steps
+        Query: {query}
 
-Query: {query}
+        Educational Content:
+        {context}
+        """
+        prompt = PromptTemplate(input_variables=["query", "context"], template=template)
+        final_prompt = prompt.invoke({"query": query, "context": context})
 
-Educational Content:
-{combined_context}
-"""
+        groq_api_key = os.getenv("GROQ_API_KEY")
+        if not groq_api_key:
+            st.error("Missing GROQ_API_KEY in .env file.")
+            st.stop()
 
-    headers = {
-        "Authorization": f"Bearer {groq_api_key}",
-        "Content-Type": "application/json"
-    }
+        os.environ["GROQ_API_KEY"] = groq_api_key
+        llm = init_chat_model("llama-3.3-70b-versatile", model_provider="groq")
+        response = llm.invoke(final_prompt)
 
-    payload = {
-        "model": model,
-        "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0.7
-    }
-
-    response = requests.post(groq_api_url, json=payload, headers=headers)
-    response.raise_for_status()
-    return response.json().get('choices', [{}])[0].get('message', {}).get('content', "No text generated.")
-
-# Streamlit UI
-st.title("🎓 Personalized Learning Assistant")
-with st.sidebar:
-    st.header("🧠 Your Preferences")
-    topic = st.text_input("What topic are you interested in?")
-    level = st.selectbox("How familiar are you?", ["Beginner", "Intermediate", "Expert"])
-    format_pref = st.radio("Preferred format", ["Videos", "Articles", "Quizzes", "Projects"])
-    objective = st.text_area("What's your learning objective?")
-    submit = st.button("Generate Report")
-
-if submit:
-    if topic and objective:
-        query = generate_query(topic, objective)
-        info = fetch_information_simulated(query)
-        store_to_chroma(info, query)
-        report = generate_structured_report(query)
-        st.subheader("📘 Generated Learning Report")
-        st.markdown(report)
-    else:
-        st.warning("Please provide both a topic and objective.")
+        # --- Display report ---
+        st.subheader("📄 Generated Learning Report")
+        st.markdown(response.content, unsafe_allow_html=True)
