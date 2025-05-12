@@ -1,5 +1,11 @@
 streamlit
+langchain
+langchain-community
+langchain-chroma
+sentence-transformers
+huggingface-hub
 chromadb
-openai
 requests
-beautifulsoup4
+python-dotenv
+groq
+torch
